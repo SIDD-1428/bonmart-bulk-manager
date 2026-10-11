@@ -1,0 +1,1 @@
+gcloud run services proxy bonmart-bulk-manager --region=asia-south1 --project=poruthurstores-1bb74 --port=8080

@@ -1,0 +1,13 @@
+﻿steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - "--build-arg=VITE_FIREBASE_API_KEY=${_VITE_FIREBASE_API_KEY}"
+      - "--build-arg=VITE_FIREBASE_AUTH_DOMAIN=${_VITE_FIREBASE_AUTH_DOMAIN}"
+      - "--build-arg=VITE_FIREBASE_PROJECT_ID=${_VITE_FIREBASE_PROJECT_ID}"
+      - "--build-arg=VITE_FIREBASE_APP_ID=${_VITE_FIREBASE_APP_ID}"
+      - "-t"
+      - "asia-south1-docker.pkg.dev/poruthurstores-1bb74/bonmart-repo/bonmart-bulk-manager:firebase-fix"
+      - "."
+images:
+  - "asia-south1-docker.pkg.dev/poruthurstores-1bb74/bonmart-repo/bonmart-bulk-manager:firebase-fix"
