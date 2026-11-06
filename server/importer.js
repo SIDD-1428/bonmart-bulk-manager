@@ -1,1 +1,229 @@
-const {parse}=require('csv-parse/sync');const {db,admin}=require('./firebase');const REQUIRED=['sku','name','price','category'];const OPTIONAL=['image','protext','rating','unit','stock','maxOrderQty'];const clean=v=>String(v??'').trim();function num(v,f,n,{integer=false,required=false}={}){const s=clean(v);if(!s&&!required)return undefined;if(!s&&required)throw Error(`Row ${n}: ${f} is required`);const x=Number(s);if(!Number.isFinite(x)||x<0||(integer&&!Number.isInteger(x)))throw Error(`Row ${n}: ${f} must be a non-negative ${integer?'integer':'number'}`);return x}function parseRows(buffer){const rows=parse(buffer,{columns:h=>h.map(x=>x.trim()),skip_empty_lines:true,bom:true,trim:true});if(!rows.length)throw Error('CSV contains no product rows.');const h=Object.keys(rows[0]);for(const f of REQUIRED)if(!h.includes(f))throw Error(`Missing required CSV column: ${f}`);const seen=new Set(),valid=[],errors=[];rows.forEach((r,i)=>{const n=i+2;try{const p={};for(const f of REQUIRED){p[f]=clean(r[f]);if(!p[f])throw Error(`${f} is required`)}p.sku=p.sku.toUpperCase();if(seen.has(p.sku))throw Error(`Duplicate SKU in CSV: ${p.sku}`);seen.add(p.sku);p.price=num(r.price,'price',n,{required:true});p.rating=num(r.rating,'rating',n);p.stock=num(r.stock,'stock',n,{integer:true});p.maxOrderQty=num(r.maxOrderQty,'maxOrderQty',n,{integer:true});for(const f of ['image','protext','unit'])p[f]=clean(r[f]);valid.push({n,p})}catch(e){errors.push(e.message)}});if(errors.length)throw Error('CSV validation failed:\n'+errors.join('\n'));return {rows,valid}}async function buildPlan(buffer){const {rows,valid}=parseRows(buffer);const [ps,cs]=await Promise.all([db.collection('products').get(),db.collection('categories').get()]);const bySku=new Map();for(const d of ps.docs){for(const k of [d.data().sku,d.id].filter(Boolean).map(v=>String(v).trim().toUpperCase())){if(bySku.has(k)&&bySku.get(k).id!==d.id)throw Error(`Ambiguous SKU/document ID '${k}'.`);bySku.set(k,d)}}const cats=new Set();for(const d of cs.docs)for(const v of [d.data().name,d.data().category,d.data().title])if(typeof v==='string'&&v.trim())cats.add(v.trim().toLowerCase());const plan=[],errors=[];for(const {n,p} of valid){if(cats.size&&!cats.has(p.category.toLowerCase())){errors.push(`Row ${n}: category '${p.category}' was not found.`);continue}const old=bySku.get(p.sku),isNew=!old;if(isNew&&(!p.image||p.stock===undefined||p.rating===undefined||p.maxOrderQty===undefined||!p.unit)){errors.push(`Row ${n}: new products require image, stock, rating, unit and maxOrderQty.`);continue}const ref=old?old.ref:db.collection('products').doc();const data={sku:p.sku,name:p.name,price:p.price,category:p.category,updatedAt:admin.firestore.FieldValue.serverTimestamp()};if(isNew){Object.assign(data,{image:p.image,protext:p.protext||'',rating:p.rating,unit:p.unit,stock:p.stock,maxOrderQty:p.maxOrderQty,createdAt:admin.firestore.FieldValue.serverTimestamp()})}else for(const f of OPTIONAL)if(p[f]!==undefined&&p[f]!=='')data[f]=p[f];plan.push({sku:p.sku,name:p.name,category:p.category,price:p.price,operation:isNew?'CREATE':'UPDATE',documentId:ref.id,ref,data})}if(errors.length)throw Error('Import validation failed:\n'+errors.join('\n'));return {totalRows:rows.length,createCount:plan.filter(x=>x.operation==='CREATE').length,updateCount:plan.filter(x=>x.operation==='UPDATE').length,operations:plan.map(({sku,name,category,price,operation,documentId})=>({sku,name,category,price,operation,documentId})),plan}}async function commitPlan(plan){for(let i=0;i<plan.length;i+=400){const b=db.batch();for(const x of plan.slice(i,i+400))b.set(x.ref,x.data,{merge:true});await b.commit()}}module.exports={buildPlan,commitPlan};
+const { parse } = require('csv-parse/sync');
+const { db, admin } = require('./firebase');
+
+const REQUIRED = ['sku', 'name', 'price', 'category'];
+const OPTIONAL = ['image', 'protext', 'rating', 'unit', 'stock', 'maxOrderQty'];
+
+const clean = (value) => String(value ?? '').trim();
+
+function num(value, field, row, { integer = false, required = false, positive = false } = {}) {
+  const raw = clean(value);
+  if (!raw && !required) return undefined;
+  if (!raw) throw Error(`Row ${row}: ${field} is required`);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || (integer && !Number.isInteger(parsed)) || (positive && parsed <= 0)) {
+    throw Error(`Row ${row}: ${field} must be a ${positive ? 'positive' : 'non-negative'} ${integer ? 'integer' : 'number'}`);
+  }
+  return parsed;
+}
+
+function parsePresetUnits(value, enabled, row) {
+  if (enabled === undefined && !clean(value)) return undefined;
+  if (enabled === false) return [];
+  if (!clean(value)) {
+    if (enabled === true) throw Error(`Row ${row}: presetUnits is required when presetUnitsEnabled is TRUE`);
+    return undefined;
+  }
+
+  let options;
+  try {
+    options = JSON.parse(value);
+  } catch {
+    throw Error(`Row ${row}: presetUnits must contain valid JSON`);
+  }
+  if (!Array.isArray(options) || options.length === 0) {
+    throw Error(`Row ${row}: presetUnits must be a non-empty JSON array`);
+  }
+
+  const ids = new Set();
+  return options.map((option, index) => {
+    const id = clean(option?.id);
+    const label = clean(option?.label);
+    if (!id) throw Error(`Row ${row}: preset option ${index + 1} needs an id`);
+    if (ids.has(id)) throw Error(`Row ${row}: duplicate preset option id '${id}'`);
+    ids.add(id);
+    if (!label) throw Error(`Row ${row}: preset option '${id}' needs a label`);
+    const baseQuantity = Number(option?.baseQuantity);
+    const price = Number(option?.price);
+    if (!Number.isFinite(baseQuantity) || baseQuantity <= 0) {
+      throw Error(`Row ${row}: preset option '${id}' baseQuantity must be greater than zero`);
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      throw Error(`Row ${row}: preset option '${id}' price must be zero or greater`);
+    }
+    return { id, label, baseQuantity, price };
+  });
+}
+
+function parseRows(buffer) {
+  const rows = parse(buffer, {
+    columns: (headers) => headers.map((header) => header.trim()),
+    skip_empty_lines: true,
+    bom: true,
+    trim: true,
+  });
+  if (!rows.length) throw Error('CSV contains no product rows.');
+
+  const headers = Object.keys(rows[0]);
+  for (const field of REQUIRED) {
+    if (!headers.includes(field)) throw Error(`Missing required CSV column: ${field}`);
+  }
+
+  const seen = new Set();
+  const valid = [];
+  const errors = [];
+
+  rows.forEach((row, index) => {
+    const rowNumber = index + 2;
+    try {
+      const product = {};
+      for (const field of REQUIRED) {
+        product[field] = clean(row[field]);
+        if (!product[field]) throw Error(`${field} is required`);
+      }
+
+      product.sku = product.sku.toUpperCase();
+      if (seen.has(product.sku)) throw Error(`Duplicate SKU in CSV: ${product.sku}`);
+      seen.add(product.sku);
+
+      product.price = num(row.price, 'price', rowNumber, { required: true });
+      product.rating = num(row.rating, 'rating', rowNumber);
+      product.stock = num(row.stock, 'stock', rowNumber, { integer: true });
+      product.maxOrderQty = num(row.maxOrderQty, 'maxOrderQty', rowNumber, { integer: true });
+      for (const field of ['image', 'protext', 'unit']) product[field] = clean(row[field]);
+
+      const enabledText = clean(row.presetUnitsEnabled).toLowerCase();
+      if (enabledText && !['true', 'false'].includes(enabledText)) {
+        throw Error('presetUnitsEnabled must be TRUE or FALSE');
+      }
+      product.presetUnitsEnabled = enabledText ? enabledText === 'true' : undefined;
+      product.presetUnits = parsePresetUnits(row.presetUnits, product.presetUnitsEnabled, rowNumber);
+
+      if (product.presetUnitsEnabled === true && !product.unit) {
+        throw Error('unit (the base unit, such as kg or g) is required when presets are enabled');
+      }
+      valid.push({ rowNumber, product });
+    } catch (error) {
+      errors.push(`Row ${rowNumber}: ${error.message}`);
+    }
+  });
+
+  if (errors.length) throw Error('CSV validation failed:\n' + errors.join('\n'));
+  return { rows, valid };
+}
+
+async function buildPlan(buffer) {
+  const { rows, valid } = parseRows(buffer);
+  const [productsSnapshot, categoriesSnapshot] = await Promise.all([
+    db.collection('products').get(),
+    db.collection('categories').get(),
+  ]);
+
+  const bySku = new Map();
+  for (const document of productsSnapshot.docs) {
+    for (const key of [document.data().sku, document.id].filter(Boolean).map((value) => String(value).trim().toUpperCase())) {
+      if (bySku.has(key) && bySku.get(key).id !== document.id) {
+        throw Error(`Ambiguous SKU/document ID '${key}'.`);
+      }
+      bySku.set(key, document);
+    }
+  }
+
+  const categories = new Set();
+  for (const document of categoriesSnapshot.docs) {
+    const data = document.data();
+    for (const value of [data.name, data.category, data.title]) {
+      if (typeof value === 'string' && value.trim()) categories.add(value.trim().toLowerCase());
+    }
+  }
+
+  const plan = [];
+  const errors = [];
+  for (const { rowNumber, product } of valid) {
+    if (categories.size && !categories.has(product.category.toLowerCase())) {
+      errors.push(`Row ${rowNumber}: category '${product.category}' was not found.`);
+      continue;
+    }
+
+    const existing = bySku.get(product.sku);
+    const isNew = !existing;
+    if (isNew && (!product.image || product.stock === undefined || product.rating === undefined || product.maxOrderQty === undefined || !product.unit)) {
+      errors.push(`Row ${rowNumber}: new products require image, stock, rating, unit and maxOrderQty.`);
+      continue;
+    }
+    if (isNew && product.presetUnitsEnabled === true && !product.presetUnits?.length) {
+      errors.push(`Row ${rowNumber}: new products with presets require at least one preset option.`);
+      continue;
+    }
+
+    const ref = existing ? existing.ref : db.collection('products').doc();
+    const data = {
+      sku: product.sku,
+      name: product.name,
+      price: product.price,
+      category: product.category,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (isNew) {
+      Object.assign(data, {
+        image: product.image,
+        protext: product.protext || '',
+        rating: product.rating,
+        unit: product.unit,
+        stock: product.stock,
+        maxOrderQty: product.maxOrderQty,
+        presetUnitsEnabled: product.presetUnitsEnabled === true,
+        presetUnits: product.presetUnits || [],
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } else {
+      for (const field of OPTIONAL) {
+        if (product[field] !== undefined && product[field] !== '') data[field] = product[field];
+      }
+      // Blank preset columns preserve the current configuration. FALSE explicitly clears it.
+      if (product.presetUnitsEnabled !== undefined) {
+        data.presetUnitsEnabled = product.presetUnitsEnabled;
+        if (product.presetUnitsEnabled === false) data.presetUnits = [];
+      }
+      if (product.presetUnits !== undefined) data.presetUnits = product.presetUnits;
+    }
+
+    plan.push({
+      sku: product.sku,
+      name: product.name,
+      category: product.category,
+      price: product.price,
+      presetUnitsEnabled: data.presetUnitsEnabled ?? existing?.data()?.presetUnitsEnabled ?? false,
+      presetUnits: data.presetUnits ?? existing?.data()?.presetUnits ?? [],
+      operation: isNew ? 'CREATE' : 'UPDATE',
+      documentId: ref.id,
+      ref,
+      data,
+    });
+  }
+
+  if (errors.length) throw Error('Import validation failed:\n' + errors.join('\n'));
+
+  return {
+    totalRows: rows.length,
+    createCount: plan.filter((item) => item.operation === 'CREATE').length,
+    updateCount: plan.filter((item) => item.operation === 'UPDATE').length,
+    operations: plan.map(({ sku, name, category, price, presetUnitsEnabled, presetUnits, operation, documentId }) => ({
+      sku, name, category, price, presetUnitsEnabled, presetUnits, operation, documentId,
+    })),
+    plan,
+  };
+}
+
+async function commitPlan(plan) {
+  for (let index = 0; index < plan.length; index += 400) {
+    const batch = db.batch();
+    for (const item of plan.slice(index, index + 400)) {
+      batch.set(item.ref, item.data, { merge: true });
+    }
+    await batch.commit();
+  }
+}
+
+module.exports = { buildPlan, commitPlan };
