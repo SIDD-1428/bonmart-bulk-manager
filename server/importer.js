@@ -98,6 +98,9 @@ function parseRows(buffer) {
       }
       product.presetUnitsEnabled = enabledText ? enabledText === 'true' : undefined;
       product.presetUnits = parsePresetUnits(row.presetUnits, product.presetUnitsEnabled, rowNumber);
+      if (product.presetUnits !== undefined && product.presetUnitsEnabled === undefined) {
+        product.presetUnitsEnabled = true;
+      }
 
       if (product.presetUnitsEnabled === true && !product.unit) {
         throw Error('unit (the base unit, such as kg or g) is required when presets are enabled');
