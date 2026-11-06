@@ -7,8 +7,8 @@ import {
 import { auth } from './firebase';
 
 const TEMPLATE =
-  'sku,name,price,image,protext,category,rating,unit,stock,maxOrderQty,presetUnitsEnabled,presetUnits\n' +
-  'RICE001,Rice,65,https://example.com/rice.jpg,Premium rice,Rice,0,kg,100,10,TRUE,"[{""id"":""1kg"",""label"":""1 kg"",""baseQuantity"":1,""price"":65},{""id"":""3kg"",""label"":""3 kg"",""baseQuantity"":3,""price"":190}]"\n';
+  'sku,name,price,image,protext,category,rating,unit,stock,maxOrderQty\n' +
+  'EXAMPLE001,Example product,25,https://example.com/image.jpg,Example description,"Flour,Suji",0,pack,10,3\n';
 
 function download() {
   const a = document.createElement('a');
@@ -253,8 +253,7 @@ export default function App() {
 
         <section className="card">
           <h3>↑　Upload CSV file</h3>
-          <p>Use the BonMart template to avoid formatting errors. Preset options are entered as a JSON array in one CSV cell.</p>
-          <div className="note">For preset products, set unit to the base unit (for example kg), stock to the shared base-unit quantity (for example 100), presetUnitsEnabled to TRUE, and presetUnits to a JSON array. Leave both preset columns blank on an existing product to preserve its current preset setup. Set presetUnitsEnabled to FALSE to disable and clear presets.</div>
+          <p>Use the BonMart template to avoid formatting errors.</p>
 
           <label className="drop">
             {file ? file.name : 'Drop your CSV here or click to browse'}
@@ -342,7 +341,6 @@ export default function App() {
                     <th>Product</th>
                     <th>Category</th>
                     <th>CSV price</th>
-                    <th>Preset units</th>
                     <th>Document ID</th>
                   </tr>
                 </thead>
@@ -356,7 +354,6 @@ export default function App() {
                       <td>{o.name}</td>
                       <td>{o.category}</td>
                       <td>₹{o.price}</td>
-                      <td>{o.presetUnitsEnabled ? (o.presetUnits || []).map((unit) => unit.label + ': ₹' + unit.price).join(', ') : '—'}</td>
                       <td>{o.documentId}</td>
                     </tr>
                   ))}
