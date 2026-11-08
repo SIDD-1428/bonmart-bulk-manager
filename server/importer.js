@@ -1,1 +1,237 @@
-const {parse}=require('csv-parse/sync');const {db,admin}=require('./firebase');const REQUIRED=['sku','name','price','category'];const OPTIONAL=['image','protext','rating','unit','stock','maxOrderQty'];const clean=v=>String(v??'').trim();function num(v,f,n,{integer=false,required=false}={}){const s=clean(v);if(!s&&!required)return undefined;if(!s&&required)throw Error(`Row ${n}: ${f} is required`);const x=Number(s);if(!Number.isFinite(x)||x<0||(integer&&!Number.isInteger(x)))throw Error(`Row ${n}: ${f} must be a non-negative ${integer?'integer':'number'}`);return x}function parseRows(buffer){const rows=parse(buffer,{columns:h=>h.map(x=>x.trim()),skip_empty_lines:true,bom:true,trim:true});if(!rows.length)throw Error('CSV contains no product rows.');const h=Object.keys(rows[0]);for(const f of REQUIRED)if(!h.includes(f))throw Error(`Missing required CSV column: ${f}`);const seen=new Set(),valid=[],errors=[];rows.forEach((r,i)=>{const n=i+2;try{const p={};for(const f of REQUIRED){p[f]=clean(r[f]);if(!p[f])throw Error(`${f} is required`)}p.sku=p.sku.toUpperCase();if(seen.has(p.sku))throw Error(`Duplicate SKU in CSV: ${p.sku}`);seen.add(p.sku);p.price=num(r.price,'price',n,{required:true});p.rating=num(r.rating,'rating',n);p.stock=num(r.stock,'stock',n,{integer:true});p.maxOrderQty=num(r.maxOrderQty,'maxOrderQty',n,{integer:true});for(const f of ['image','protext','unit'])p[f]=clean(r[f]);valid.push({n,p})}catch(e){errors.push(e.message)}});if(errors.length)throw Error('CSV validation failed:\n'+errors.join('\n'));return {rows,valid}}async function buildPlan(buffer){const {rows,valid}=parseRows(buffer);const [ps,cs]=await Promise.all([db.collection('products').get(),db.collection('categories').get()]);const bySku=new Map();for(const d of ps.docs){for(const k of [d.data().sku,d.id].filter(Boolean).map(v=>String(v).trim().toUpperCase())){if(bySku.has(k)&&bySku.get(k).id!==d.id)throw Error(`Ambiguous SKU/document ID '${k}'.`);bySku.set(k,d)}}const cats=new Set();for(const d of cs.docs)for(const v of [d.data().name,d.data().category,d.data().title])if(typeof v==='string'&&v.trim())cats.add(v.trim().toLowerCase());const plan=[],errors=[];for(const {n,p} of valid){if(cats.size&&!cats.has(p.category.toLowerCase())){errors.push(`Row ${n}: category '${p.category}' was not found.`);continue}const old=bySku.get(p.sku),isNew=!old;if(isNew&&(!p.image||p.stock===undefined||p.rating===undefined||p.maxOrderQty===undefined||!p.unit)){errors.push(`Row ${n}: new products require image, stock, rating, unit and maxOrderQty.`);continue}const ref=old?old.ref:db.collection('products').doc();const data={sku:p.sku,name:p.name,price:p.price,category:p.category,updatedAt:admin.firestore.FieldValue.serverTimestamp()};if(isNew){Object.assign(data,{image:p.image,protext:p.protext||'',rating:p.rating,unit:p.unit,stock:p.stock,maxOrderQty:p.maxOrderQty,createdAt:admin.firestore.FieldValue.serverTimestamp()})}else for(const f of OPTIONAL)if(p[f]!==undefined&&p[f]!=='')data[f]=p[f];plan.push({sku:p.sku,name:p.name,category:p.category,price:p.price,operation:isNew?'CREATE':'UPDATE',documentId:ref.id,ref,data})}if(errors.length)throw Error('Import validation failed:\n'+errors.join('\n'));return {totalRows:rows.length,createCount:plan.filter(x=>x.operation==='CREATE').length,updateCount:plan.filter(x=>x.operation==='UPDATE').length,operations:plan.map(({sku,name,category,price,operation,documentId})=>({sku,name,category,price,operation,documentId})),plan}}async function commitPlan(plan){for(let i=0;i<plan.length;i+=400){const b=db.batch();for(const x of plan.slice(i,i+400))b.set(x.ref,x.data,{merge:true});await b.commit()}}module.exports={buildPlan,commitPlan};
+const { parse } = require('csv-parse/sync');
+const XLSX = require('xlsx');
+const { db, admin } = require('./firebase');
+
+const REQUIRED = ['name', 'mrp', 'price', 'category'];
+const OPTIONAL = ['sku', 'image', 'protext', 'rating', 'unit', 'stock', 'maxOrderQty', 'brandName'];
+const CLEAR = '__CLEAR__';
+const clean = (value) => String(value ?? '').trim();
+const normalized = (value) => clean(value).toLowerCase();
+
+function number(value, field, row, { integer = false, required = false } = {}) {
+  const raw = clean(value);
+  if (!raw && !required) return undefined;
+  if (!raw && required) throw new Error(`Row ${row}: ${field} is required.`);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || (integer && !Number.isInteger(parsed))) {
+    throw new Error(`Row ${row}: ${field} must be a non-negative ${integer ? 'integer' : 'number'}.`);
+  }
+  return parsed;
+}
+
+function readRows(buffer, filename = 'products.csv') {
+  const isExcel = /\.xlsx?$/i.test(filename);
+  if (!isExcel) {
+    return parse(buffer, {
+      columns: (headers) => headers.map((header) => clean(header)),
+      skip_empty_lines: true,
+      bom: true,
+      trim: true,
+    });
+  }
+
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false });
+  const sheetName = workbook.SheetNames.find((name) => normalized(name) === 'products');
+  if (!sheetName) throw new Error('Excel workbook must contain a sheet named "Products".');
+  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    defval: '',
+    raw: false,
+    blankrows: false,
+  });
+}
+
+function parseRows(buffer, filename) {
+  const rows = readRows(buffer, filename);
+  if (!rows.length) throw new Error('The Products sheet contains no product rows.');
+  const headers = Object.keys(rows[0]).map(clean);
+  for (const field of REQUIRED) {
+    if (!headers.includes(field)) throw new Error(`Missing required column in Products sheet: ${field}`);
+  }
+
+  const seenSkus = new Set();
+  const valid = [];
+  const errors = [];
+
+  rows.forEach((row, index) => {
+    const rowNumber = index + 2;
+    try {
+      const product = {};
+      for (const field of REQUIRED) {
+        product[field] = clean(row[field]);
+        if (!product[field]) throw new Error(`${field} is required.`);
+      }
+      product.productId = clean(row.productId);
+      product.sku = clean(row.sku).toUpperCase();
+      if (product.sku) {
+        if (seenSkus.has(product.sku)) throw new Error(`Duplicate SKU in file: ${product.sku}.`);
+        seenSkus.add(product.sku);
+      }
+
+      product.mrp = number(row.mrp, 'mrp', rowNumber, { required: true });
+      product.price = number(row.price, 'price', rowNumber, { required: true });
+      if (product.mrp < product.price) throw new Error('MRP must be greater than or equal to selling price.');
+      product.rating = number(row.rating, 'rating', rowNumber);
+      if (product.rating !== undefined && product.rating > 5) throw new Error('rating must be between 0 and 5.');
+      product.stock = number(row.stock, 'stock', rowNumber, { integer: true });
+      product.maxOrderQty = number(row.maxOrderQty, 'maxOrderQty', rowNumber, { integer: true });
+
+      for (const field of ['image', 'protext', 'unit', 'brandName']) product[field] = clean(row[field]);
+      if (product.brandName.toUpperCase() === CLEAR) product.brandName = CLEAR;
+      valid.push({ rowNumber, product });
+    } catch (error) {
+      errors.push(`Row ${rowNumber}: ${error.message}`);
+    }
+  });
+
+  if (errors.length) throw new Error('Product sheet validation failed:\n' + errors.join('\n'));
+  return { rows, valid };
+}
+
+async function buildPlan(buffer, filename = 'products.csv') {
+  const { rows, valid } = parseRows(buffer, filename);
+  const [productSnapshot, categorySnapshot, brandSnapshot] = await Promise.all([
+    db.collection('products').get(),
+    db.collection('categories').get(),
+    db.collection('brands').get(),
+  ]);
+
+  const bySku = new Map();
+  const byId = new Map();
+  for (const document of productSnapshot.docs) {
+    const data = document.data();
+    byId.set(document.id, document);
+    const sku = clean(data.sku).toUpperCase();
+    if (sku) {
+      if (bySku.has(sku) && bySku.get(sku).id !== document.id) {
+        throw new Error(`Ambiguous SKU "${sku}" exists on multiple products.`);
+      }
+      bySku.set(sku, document);
+    }
+  }
+
+  const categories = new Map();
+  for (const document of categorySnapshot.docs) {
+    const data = document.data();
+    for (const value of [data.name, data.category, data.title]) {
+      if (typeof value === 'string' && value.trim()) categories.set(normalized(value), value.trim());
+    }
+  }
+
+  const brandsByName = new Map();
+  for (const document of brandSnapshot.docs) {
+    const data = document.data();
+    if (data.name && data.isActive !== false) brandsByName.set(normalized(data.name), { id: document.id, name: data.name });
+  }
+
+  const plan = [];
+  const errors = [];
+
+  for (const { rowNumber, product } of valid) {
+    const category = categories.get(normalized(product.category));
+    if (!category) {
+      errors.push(`Row ${rowNumber}: category "${product.category}" was not found in the BonMart category catalogue.`);
+      continue;
+    }
+
+    const skuMatch = product.sku ? bySku.get(product.sku) : null;
+    const idMatch = product.productId ? byId.get(product.productId) : null;
+    if (product.productId && !idMatch) {
+      errors.push(`Row ${rowNumber}: productId "${product.productId}" was not found.`);
+      continue;
+    }
+    if (skuMatch && idMatch && skuMatch.id !== idMatch.id) {
+      errors.push(`Row ${rowNumber}: productId and SKU point to different products.`);
+      continue;
+    }
+
+    const existing = idMatch || skuMatch;
+    const isNew = !existing;
+    if (isNew && !product.sku) {
+      errors.push(`Row ${rowNumber}: SKU is required for a new product. For updates, provide productId or an existing SKU.`);
+      continue;
+    }
+    if (isNew && !product.image) {
+      errors.push(`Row ${rowNumber}: image is required for a new product.`);
+      continue;
+    }
+
+    let brandId;
+    if (product.brandName && product.brandName !== CLEAR) {
+      const brand = brandsByName.get(normalized(product.brandName));
+      if (!brand) {
+        errors.push(`Row ${rowNumber}: active brand "${product.brandName}" was not found. Use the exact brand name from Manage Brands.`);
+        continue;
+      }
+      brandId = brand.id;
+    }
+
+    const ref = existing ? existing.ref : db.collection('products').doc();
+    const oldData = existing ? existing.data() : {};
+    const data = {
+      name: product.name,
+      mrp: product.mrp,
+      price: product.price,
+      category,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (product.sku) data.sku = product.sku;
+    if (isNew) {
+      Object.assign(data, {
+        image: product.image,
+        protext: product.protext || '',
+        rating: product.rating ?? 0,
+        unit: product.unit || '',
+        stock: product.stock ?? 0,
+        maxOrderQty: product.maxOrderQty ?? 0,
+        brandId: brandId || null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } else {
+      for (const field of ['image', 'protext', 'rating', 'unit', 'stock', 'maxOrderQty']) {
+        if (product[field] !== undefined && product[field] !== '') data[field] = product[field];
+      }
+      if (product.brandName === CLEAR) data.brandId = null;
+      else if (brandId) data.brandId = brandId;
+      else if (oldData.brandId !== undefined) data.brandId = oldData.brandId;
+    }
+
+    plan.push({
+      sku: product.sku || clean(oldData.sku) || '',
+      name: product.name,
+      category,
+      mrp: product.mrp,
+      price: product.price,
+      brand: product.brandName === CLEAR ? 'Clear brand' : (product.brandName || ''),
+      operation: isNew ? 'CREATE' : 'UPDATE',
+      documentId: ref.id,
+      data,
+      ref,
+    });
+  }
+
+  if (errors.length) throw new Error('Import validation failed:\n' + errors.join('\n'));
+
+  return {
+    totalRows: rows.length,
+    createCount: plan.filter((item) => item.operation === 'CREATE').length,
+    updateCount: plan.filter((item) => item.operation === 'UPDATE').length,
+    operations: plan.map(({ sku, name, category, mrp, price, brand, operation, documentId }) => ({
+      sku, name, category, mrp, price, brand, operation, documentId,
+    })),
+    plan,
+  };
+}
+
+async function commitPlan(plan) {
+  for (let index = 0; index < plan.length; index += 400) {
+    const batch = db.batch();
+    for (const item of plan.slice(index, index + 400)) {
+      // merge:true intentionally preserves admin-managed fields such as groupId.
+      batch.set(item.ref, item.data, { merge: true });
+    }
+    await batch.commit();
+  }
+}
+
+module.exports = { buildPlan, commitPlan };
