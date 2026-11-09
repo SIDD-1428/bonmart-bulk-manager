@@ -168,6 +168,10 @@ async function buildPlan(buffer, filename = 'products.csv', options = {}) {
     // New document IDs are supplied by the saved preview session during commit.
     // This keeps the reviewed plan stable without trusting IDs from the browser.
     const reservedId = isNew ? options.newDocumentIds?.[product.sku] : undefined;
+    if (reservedId && byId.has(reservedId)) {
+      errors.push(`Row ${rowNumber}: reserved product document ID "${reservedId}" is already in use. Preview again.`);
+      continue;
+    }
     const ref = existing
       ? existing.ref
       : reservedId
