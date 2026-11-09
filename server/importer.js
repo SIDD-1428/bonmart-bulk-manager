@@ -87,7 +87,7 @@ function parseRows(buffer, filename) {
   return { rows, valid };
 }
 
-async function buildPlan(buffer, filename = 'products.csv') {
+async function buildPlan(buffer, filename = 'products.csv', options = {}) {
   const { rows, valid } = parseRows(buffer, filename);
   const [productSnapshot, categorySnapshot, brandSnapshot] = await Promise.all([
     db.collection('products').get(),
@@ -168,11 +168,8 @@ const existing = idMatch || skuMatch;
       brandId = brand.id;
     }
 
-const ref = existing
-  ? existing.ref
-  : product.productId
-    ? db.collection('products').doc(product.productId)
-    : db.collection('products').doc();    const oldData = existing ? existing.data() : {};
+    const ref = existing ? existing.ref : db.collection('products').doc();
+    const oldData = existing ? existing.data() : {};
     const data = {
       name: product.name,
       mrp: product.mrp,

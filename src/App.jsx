@@ -161,6 +161,7 @@ export default function App() {
     try {
       const result = await api('commit', {
         confirm: 'IMPORT',
+        sessionId: preview.sessionId,
         digest: preview.digest,
         planDigest: preview.planDigest,
         totalRows: preview.totalRows,
@@ -317,7 +318,7 @@ export default function App() {
             <button className="commit" disabled={!confirm || loading || preview.totalRows !== preview.createCount + preview.updateCount} onClick={commit}>
               {loading ? 'Importing…' : `Confirm & import ${preview.totalRows} row(s)`}
             </button>
-            <p className="subtle">Commit revalidates the file and rebuilds the plan against Firestore.</p>
+            <p className="subtle">This preview is valid for 30 minutes. Commit revalidates the file and catalogue using the same server-reserved product IDs.</p>
           </section>
         )}
         <footer className="pagefoot">BONMART OPERATIONS · Handle product data with care.</footer>
