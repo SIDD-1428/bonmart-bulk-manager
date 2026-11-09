@@ -20,7 +20,7 @@ function number(value, field, row, { integer = false, required = false } = {}) {
 }
 
 function readRows(buffer, filename = 'products.csv') {
-  const isExcel = /\\.xlsx?$/i.test(filename);
+  const isExcel = /\.xlsx?$/i.test(filename);
   if (!isExcel) {
     return parse(buffer, {
       columns: (headers) => headers.map((header) => clean(header)),
@@ -83,7 +83,7 @@ function parseRows(buffer, filename) {
     }
   });
 
-  if (errors.length) throw new Error('Product sheet validation failed:\\n' + errors.join('\\n'));
+  if (errors.length) throw new Error('Product sheet validation failed:\n' + errors.join('\n'));
   return { rows, valid };
 }
 
@@ -217,7 +217,7 @@ async function buildPlan(buffer, filename = 'products.csv', options = {}) {
     });
   }
 
-  if (errors.length) throw new Error('Import validation failed:\\n' + errors.join('\\n'));
+  if (errors.length) throw new Error('Import validation failed:\n' + errors.join('\n'));
 
   return {
     totalRows: rows.length,
