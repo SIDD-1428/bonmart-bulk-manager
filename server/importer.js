@@ -134,17 +134,20 @@ async function buildPlan(buffer, filename = 'products.csv') {
     }
 
     const skuMatch = product.sku ? bySku.get(product.sku) : null;
-    const idMatch = product.productId ? byId.get(product.productId) : null;
-    if (product.productId && !idMatch) {
-      errors.push(`Row ${rowNumber}: productId "${product.productId}" was not found.`);
-      continue;
-    }
-    if (skuMatch && idMatch && skuMatch.id !== idMatch.id) {
-      errors.push(`Row ${rowNumber}: productId and SKU point to different products.`);
-      continue;
-    }
+const idMatch = product.productId ? byId.get(product.productId) : null;
 
-    const existing = idMatch || skuMatch;
+// If both identifiers match different existing products, reject the row.
+if (skuMatch && idMatch && skuMatch.id !== idMatch.id) {
+  errors.push(`Row ${rowNumber}: productId and SKU point to different products.`);
+  continue;
+}
+
+// Prefer an existing document ID match, then an existing SKU match.
+// An unknown productId is allowed for a new product.
+const existing = idMatch || skuMatch;
+
+
+
     const isNew = !existing;
     if (isNew && !product.sku) {
       errors.push(`Row ${rowNumber}: SKU is required for a new product. For updates, provide productId or an existing SKU.`);
@@ -165,8 +168,11 @@ async function buildPlan(buffer, filename = 'products.csv') {
       brandId = brand.id;
     }
 
-    const ref = existing ? existing.ref : db.collection('products').doc();
-    const oldData = existing ? existing.data() : {};
+const ref = existing
+  ? existing.ref
+  : product.productId
+    ? db.collection('products').doc(product.productId)
+    : db.collection('products').doc();    const oldData = existing ? existing.data() : {};
     const data = {
       name: product.name,
       mrp: product.mrp,
