@@ -124,8 +124,28 @@ export default function App() {
       headers: { Authorization: 'Bearer ' + token },
       body: fd,
     });
-    const data = await response.json();
-    if (!response.ok) throw Error(data.error || 'Request failed');
+    const responseText = await response.text();
+    let data = null;
+
+    if (responseText.trim()) {
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        const preview = responseText.trim().slice(0, 180).replace(/\\s+/g, ' ');
+        throw Error(
+          `Server returned a non-JSON response (HTTP ${response.status}). ` +
+          `Check that the latest backend is deployed and /api/${endpoint} is routed to Cloud Run. ` +
+          `Response: ${preview || 'empty response'}`
+        );
+      }
+    }
+
+    if (!response.ok) {
+      throw Error(data?.error || `Request failed (HTTP ${response.status}).`);
+    }
+    if (!data || typeof data !== 'object') {
+      throw Error(`Server returned an empty response (HTTP ${response.status}). Check the Cloud Run service logs.`);
+    }
     return data;
   }
 
