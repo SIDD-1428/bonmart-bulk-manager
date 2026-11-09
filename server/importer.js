@@ -20,7 +20,7 @@ function number(value, field, row, { integer = false, required = false } = {}) {
 }
 
 function readRows(buffer, filename = 'products.csv') {
-  const isExcel = /\.xlsx?$/i.test(filename);
+  const isExcel = /\\.xlsx?$/i.test(filename);
   if (!isExcel) {
     return parse(buffer, {
       columns: (headers) => headers.map((header) => clean(header)),
@@ -83,11 +83,11 @@ function parseRows(buffer, filename) {
     }
   });
 
-  if (errors.length) throw new Error('Product sheet validation failed:\n' + errors.join('\n'));
+  if (errors.length) throw new Error('Product sheet validation failed:\\n' + errors.join('\\n'));
   return { rows, valid };
 }
 
-async function buildPlan(buffer, filename = 'products.csv') {
+async function buildPlan(buffer, filename = 'products.csv', options = {}) {
   const { rows, valid } = parseRows(buffer, filename);
   const [productSnapshot, categorySnapshot, brandSnapshot] = await Promise.all([
     db.collection('products').get(),
@@ -165,7 +165,14 @@ async function buildPlan(buffer, filename = 'products.csv') {
       brandId = brand.id;
     }
 
-    const ref = existing ? existing.ref : db.collection('products').doc();
+    // New document IDs are supplied by the saved preview session during commit.
+    // This keeps the reviewed plan stable without trusting IDs from the browser.
+    const reservedId = isNew ? options.newDocumentIds?.[product.sku] : undefined;
+    const ref = existing
+      ? existing.ref
+      : reservedId
+        ? db.collection('products').doc(reservedId)
+        : db.collection('products').doc();
     const oldData = existing ? existing.data() : {};
     const data = {
       name: product.name,
@@ -210,7 +217,7 @@ async function buildPlan(buffer, filename = 'products.csv') {
     });
   }
 
-  if (errors.length) throw new Error('Import validation failed:\n' + errors.join('\n'));
+  if (errors.length) throw new Error('Import validation failed:\\n' + errors.join('\\n'));
 
   return {
     totalRows: rows.length,
