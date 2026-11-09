@@ -14,7 +14,7 @@ const maxMb = Number.isFinite(Number(process.env.MAX_UPLOAD_MB))
   ? Math.min(10, Math.max(1, Number(process.env.MAX_UPLOAD_MB)))
   : 5;
 const PREVIEW_TTL_MS = 30 * 60 * 1000;
-const allowedFile = (name) => /\\.(csv|xlsx)$/i.test(name || '');
+const allowedFile = (name) => /\.(csv|xlsx)$/i.test(name || '');
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: maxMb * 1024 * 1024, files: 1 },
