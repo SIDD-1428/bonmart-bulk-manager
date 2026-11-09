@@ -25,6 +25,12 @@ const upload = multer({
 
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
+// Fingerprint only operation identity. The uploaded file digest protects row
+// contents; unrelated catalogue edits must not invalidate an import preview.
+const planFingerprint = (operations) => sha256(JSON.stringify(
+  operations.map(({ operation, sku, documentId }) => ({ operation, sku, documentId }))
+));
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
@@ -34,7 +40,7 @@ app.post('/api/preview', requireAdmin, upload.single('file'), async (req, res) =
 
     const plan = await buildPlan(req.file.buffer, req.file.originalname);
     const digest = sha256(req.file.buffer);
-    const planDigest = sha256(JSON.stringify(plan.operations));
+    const planDigest = planFingerprint(plan.operations);
     const sessionId = crypto.randomBytes(32).toString('hex');
     const newDocumentIds = Object.fromEntries(
       plan.plan
@@ -105,7 +111,7 @@ app.post('/api/commit', requireAdmin, upload.single('file'), async (req, res) =>
     const plan = await buildPlan(req.file.buffer, req.file.originalname, {
       newDocumentIds: session.newDocumentIds || {},
     });
-    const planDigest = sha256(JSON.stringify(plan.operations));
+    const planDigest = planFingerprint(plan.operations);
     if (planDigest !== session.planDigest ||
         planDigest !== req.body.planDigest ||
         plan.totalRows !== session.totalRows ||
